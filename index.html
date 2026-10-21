@@ -150,6 +150,14 @@
   .zoom img{display:block;margin:0 auto;width:min(1500px,185%);max-width:none;height:auto;cursor:default;box-shadow:0 24px 70px -34px #000}
   .zoom-close{position:fixed;top:16px;right:16px;z-index:210}
 
+  /* Wide-screen mode: when the book is limited by height but there is spare
+     room either side, the logo, buttons and page counter move into those side
+     margins and the book takes the full height of the window. */
+  body[data-wide="true"] .topbar{position:absolute;top:0;left:0;right:0;pointer-events:none}
+  body[data-wide="true"] .bottombar{position:absolute;right:0;bottom:0;left:auto;align-items:flex-end;pointer-events:none}
+  body[data-wide="true"] .topbar > *,
+  body[data-wide="true"] .bottombar > *{pointer-events:auto}
+
   @media (prefers-reduced-motion:reduce){ .thumb,.icon,.flipbook{transition:none} }
 </style>
 
@@ -446,13 +454,34 @@ const LINKS = [{"page": 3, "href": "https://www.material-reuse.co.uk", "x": 0.31
   flip.on('init', paint);
 
   /* ---------------- layout ---------------- */
+  const appEl = document.getElementById('app');
+  const topbarEl = document.querySelector('.topbar');
+  const bottombarEl = document.querySelector('.bottombar');
+  const wordmarkEl = document.querySelector('.wordmark');
+  const toolsEl = document.querySelector('.tools');
+  const navEl = document.querySelector('.nav');
+
   function layout() {
-    const sw = stage.clientWidth, sh = stage.clientHeight;
+    const vw = appEl.clientWidth, vh = appEl.clientHeight;
     const gutter = Math.max(12, Math.round(window.innerWidth * 0.02));
-    const availW = sw - 2 * gutter;
-    // the bars above and below are transparent and sit over the stage, so a
-    // turning page can swing behind them; only a sliver of headroom is needed
-    const availH = (sh - 4) * 0.96;
+    const R = 22 / 17;                                   // page height : width
+
+    // Standard: bars above and below the book. Wide: bars tucked into the side
+    // margins, book uses the full height. Pick whichever gives a bigger book.
+    const side = Math.max(200,
+      wordmarkEl.offsetWidth + gutter + 24,
+      toolsEl.offsetWidth + gutter + 24,
+      navEl.offsetWidth + gutter + 24);
+    const hStd = Math.min((vh - topbarEl.offsetHeight - bottombarEl.offsetHeight - 4) * 0.96,
+                          (vw - 2 * gutter) / 2 * R);
+    const hWide = Math.min(vh - 24, (vw - 2 * side) / 2 * R);
+    const wide = rail.hasAttribute('hidden') && hStd / R >= 340 && hWide > hStd * 1.03;
+    if (document.body.dataset.wide !== String(wide)) document.body.dataset.wide = String(wide);
+
+    const sw = stage.clientWidth, sh = stage.clientHeight;   // reflects the mode just set
+    const availW = wide ? vw - 2 * side : sw - 2 * gutter;
+    // a turning page can swing behind the transparent bars, so little headroom is needed
+    const availH = wide ? sh - 24 : (sh - 4) * 0.96;
     if (availW <= 0 || availH <= 0) return;
 
     // Pick whole-pixel page sizes (width even, so the cover/back-page centring
