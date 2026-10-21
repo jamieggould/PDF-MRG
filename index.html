@@ -94,6 +94,8 @@
     background:center/100% 100% no-repeat;
     pointer-events:none;
   }
+  /* page pre-rendered at the exact screen pixels it occupies (see renderPages) */
+  .paper canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
   .hotspot{
     position:absolute;z-index:5;border-radius:4px;background:transparent;
     transition:background .15s ease,box-shadow .15s ease;
@@ -283,6 +285,72 @@ const LINKS = [{"page": 3, "href": "https://www.material-reuse.co.uk", "x": 0.31
   });
   paintSound();
 
+  /* ---------------- pixel-exact page rendering ----------------
+     The page images are 2550x3300. Left to itself, the browser shrinks them
+     on the fly with a fast filter, which looks soft on standard (non-retina)
+     monitors. Instead each page is resampled once, with a high-quality filter,
+     to exactly the screen pixels it covers, lightly sharpened if it was shrunk
+     a lot, and drawn into a canvas the same size - so the screen shows it
+     pixel for pixel. Redone whenever the window or screen changes. */
+  const papers = [], canvases = [];
+  const fullImgs = PAGES.map(function (src) { const im = new Image(); im.src = src; return im; });
+  let renderToken = 0;
+
+  async function resample(img, w, h) {
+    if (!img.complete || !img.naturalWidth) await img.decode();
+    try {
+      return await createImageBitmap(img, { resizeWidth: w, resizeHeight: h, resizeQuality: 'high' });
+    } catch (e) {
+      // browsers without resize options: halve repeatedly, then a final pass
+      let src = img, sw = img.naturalWidth, sh = img.naturalHeight;
+      while (sw / 2 >= w) {
+        const c = document.createElement('canvas');
+        c.width = Math.round(sw / 2); c.height = Math.round(sh / 2);
+        const x = c.getContext('2d'); x.imageSmoothingQuality = 'high';
+        x.drawImage(src, 0, 0, c.width, c.height);
+        src = c; sw = c.width; sh = c.height;
+      }
+      const c = document.createElement('canvas'); c.width = w; c.height = h;
+      const x = c.getContext('2d'); x.imageSmoothingQuality = 'high';
+      x.drawImage(src, 0, 0, w, h);
+      return c;
+    }
+  }
+
+  // gentle unsharp mask: restores the edge contrast small type loses when shrunk
+  function sharpen(ctx, w, h, a) {
+    const id = ctx.getImageData(0, 0, w, h), s = id.data, o = new Uint8ClampedArray(s);
+    const row = w * 4, k = 1 + 4 * a;
+    for (let y = 1; y < h - 1; y++) {
+      let p = (y * w + 1) * 4;
+      for (let x = 1; x < w - 1; x++, p += 4) {
+        for (let c = 0; c < 3; c++) {
+          const i = p + c;
+          o[i] = k * s[i] - a * (s[i - 4] + s[i + 4] + s[i - row] + s[i + row]);
+        }
+      }
+    }
+    ctx.putImageData(new ImageData(o, w, h), 0, 0);
+  }
+
+  async function renderPages(wD, hD, first) {
+    const token = ++renderToken;
+    const order = PAGES.map(function (_, i) { return i; })
+      .sort(function (a, b) { return (first.indexOf(b) > -1) - (first.indexOf(a) > -1); });
+    const shrink = wD / 2550;
+    for (const i of order) {
+      let bmp;
+      try { bmp = await resample(fullImgs[i], wD, hD); } catch (e) { return; }
+      if (token !== renderToken) return;          // a newer size has taken over
+      let c = canvases[i];
+      if (!c) { c = document.createElement('canvas'); papers[i].appendChild(c); canvases[i] = c; }
+      c.width = wD; c.height = hD;
+      const ctx = c.getContext('2d');
+      ctx.drawImage(bmp, 0, 0);
+      if (shrink < 0.55) { try { sharpen(ctx, wD, hD, 0.16); } catch (e) {} }
+    }
+  }
+
   /* ---------------- build the pages ---------------- */
   PAGES.forEach(function (src, i) {
     const d = document.createElement('div');
@@ -291,6 +359,7 @@ const LINKS = [{"page": 3, "href": "https://www.material-reuse.co.uk", "x": 0.31
     paper.className = 'paper';
     paper.style.backgroundImage = 'url("' + src + '")';
     d.appendChild(paper);
+    papers[i] = paper;
     LINKS.filter(function (l) { return l.page === i; }).forEach(function (l) {
       const a = document.createElement('a');
       a.className = 'hotspot';
@@ -390,23 +459,42 @@ const LINKS = [{"page": 3, "href": "https://www.material-reuse.co.uk", "x": 0.31
     // shift is whole too), then hand the page-turn engine that exact ratio.
     // Nothing lands on a fractional pixel, so the browser never resamples the
     // page text soft. Rounding the width changes the shape by under 0.2%.
+    // Sizes are worked out in real screen pixels (devicePixelRatio), so this
+    // also holds on Windows displays scaled to 125% or 150%.
+    // The page-turn engine measures its box in whole CSS pixels, so every size
+    // and offset is a whole CSS pixel - and, on displays scaled to 125%/150%,
+    // a multiple (m) that is also a whole number of real screen pixels.
+    const dpr = window.devicePixelRatio || 1;
+    let m = 1;
+    while (m < 8 && Math.abs(m * dpr - Math.round(m * dpr)) > 1e-6) m++;
+    const snap = function (v, step) { return Math.floor(v / step) * step; };
     const fit = function (cols) {
-      const ph = Math.floor(Math.min(availH, (availW / cols) * 22 / 17));
-      return { ph: ph, pw: 2 * Math.round(ph * 17 / 22 / 2) };
+      const ph = snap(Math.min(availH, (availW / cols) * 22 / 17), m);
+      // width: even multiple of m, so the cover/back-page centring shift is whole too
+      return { ph: ph, pw: Math.round(ph * 17 / 22 / (2 * m)) * 2 * m };
     };
     let cols = 2, f = fit(2);
     if (f.pw < 340) { cols = 1; f = fit(1); }
-    const pw = Math.max(2, f.pw), ph = Math.max(2, f.ph), bw = pw * cols;
+    const pw = Math.max(2 * m, f.pw), ph = Math.max(m, f.ph), bw = pw * cols;
+    const wD = Math.round(pw * dpr), hD = Math.round(ph * dpr);
     const st = flip.getSettings();
     st.width = pw; st.height = ph;
 
     bookEl.style.width = bw + 'px';
     bookEl.style.height = ph + 'px';
-    bookEl.style.left = Math.round((sw - bw) / 2) + 'px';
-    bookEl.style.top = Math.round((sh - ph) / 2) + 'px';
+    bookEl.style.left = snap((sw - bw) / 2, m) + 'px';
+    bookEl.style.top = snap((sh - ph) / 2, m) + 'px';
     flip.update();
     paint();
+    renderPages(wD, hD, visiblePages());
   }
+
+  // moving the window to a different monitor changes the pixel density
+  (function watchDpr() {
+    const mq = window.matchMedia('(resolution: ' + (window.devicePixelRatio || 1) + 'dppx)');
+    const on = function () { layout(); watchDpr(); };
+    if (mq.addEventListener) mq.addEventListener('change', on, { once: true });
+  })();
 
   let rafId = 0;
   new ResizeObserver(function () {
